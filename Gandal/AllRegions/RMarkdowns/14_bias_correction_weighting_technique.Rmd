@@ -1,0 +1,919 @@
+---
+title: 'Bias Correction Weighting Technique'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(knitr)
+library(plotly) ; library(viridis) ; library(gridExtra) ; library(RColorBrewer) ; library(ggpubr)
+library(reshape2)
+library(mgcv) # GAM
+library(caret) ; library(DMwR) ; library(ROCR) ; library(car) ; library(MLmetrics)
+library(knitr) ; library(kableExtra)
+library(ROCR)
+library(expss)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# Ridge Regression output
+load('./../Data/Ridge_model.RData')
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+# Add all this info to predictions
+biased_predictions = predictions %>% left_join(SFARI_genes %>% dplyr::select(ID, `gene-score`), by = 'ID') %>%
+                     mutate(gene.score = ifelse(is.na(`gene-score`), 
+                                                ifelse(ID %in% GO_neuronal$ID, 'Neuronal', 'Others'), 
+                                                `gene-score`)) %>%
+                      dplyr::select(-`gene-score`)
+
+clustering_selected = 'DynamicHybrid'
+clusterings = read_csv('./../Data/clusters.csv')
+clusterings$Module = clusterings[,clustering_selected] %>% data.frame %>% unlist %>% unname
+assigned_module = clusterings %>% dplyr::select(ID, Module)
+
+
+rm(rownames_dataset, GO_annotations, datGenes, dds, clustering_selected,
+   clusterings)
+```
+<br>
+
+# Weighting Technique Implementation
+<br>
+
+## Introduction
+<br>
+
+### Problem
+<br>
+
+As it can be seen in 20_04_08_Ridge.html, there is a relation between the Probability the model assigns to a gene and the gene's mean level of expression. This is a problem because we had previously discovered a bias in the SFARI scores related to mean level of expression (Preprocessing/Gandal/AllRegions/RMarkdowns/20_04_03_SFARI_genes.html), which means that this could be a confounding factor in our model and the reason why it seems to perform well, so we need to remove this bias to recover the true biological signal that is mixed with it and improve the quality of our model.
+
+<br>
+
+### General idea
+<br>
+
+```
+train model with equal weights for all samples
+
+for l in loop:
+  calculate bias
+  correct weights to reduce bias
+  retrain model
+  
+Return last model
+  
+```
+<br>
+
+### Pseudocode
+<br>
+
+**Parameters:**
+
+- eta: Learning rate
+
+- T: Number of loops
+
+- D: Training data
+
+- H: Classification model
+
+- c: bias constraint
+
+- lambda: scaling factor for the weights
+
+- $w_i$ with $i=1,...,N$: Weights assigned to each sample
+
+<br>
+**Pseudocode:**
+
+```
+lambda = 0
+w = [1, ..., 1]
+c = std(meanExpr(D))
+
+h  = train classifier H with lambda and w
+
+for t in 1,,,T do
+  bias = <h(x), c(x)>
+  update lambda to lambda - eta*bias
+  update weights_hat to exp(lambda*mean(c))
+  update weights to w_hat/(1+w_hat) if y_i=1, 1/(1+w_hat) if y_i=0
+  update h with new weights
+  
+Return h
+```
+<br><br>
+
+## Remove Bias
+<br>
+
+### Demographic Parity as a measure of Bias
+<br>
+
+Using **Demographic Parity** as a measure of bias: A fair classifier *h* should make positive predictions each segment $G$ of the population at the same rate as in all of the population
+
+This definition is for discrete segments of the population. Since our bias is found across all the population but in different measures depending on the mean level of expression of the gene, we have to adapt this definition to a continuous bias scenario
+
+**Demographic Parity for our problem:** A fair classifier *h* should make positive predictions on genes with a certail mean level of expression at the same rate as in all of the genes in the dataset
+
+<br>
+
+#### Bias Metric
+<br>
+
+The original formula for the Demographic Parity bias is
+
+- $c(x,0) = 0 $ when the prediction is negative
+
+- $c(x,1) = \frac{g(x)}{Z_G}-1$ when the prediction is positive. Where $g(x)$ is the Kronecker delta to indicate if the sample belongs to the protected group and $Z_G$ is the proportion of the population that belongs to the group we want to protect against bias
+
+<br>
+
+Using this definitions in our problem:
+
+$g(x):$ Since all our samples belong to the protected group, this would always be 1
+
+$Z_G:$ Since all of our samples belong to the protected group, this would also always be 1
+
+So our measure of bias $c(x,1) = \frac{1}{1}-1 = 0$ for all samples. This doesn't work, so we need to adapt it to our continous case
+
+<br>
+
+#### Adaptation of the bias metric
+<br>
+
+We can use $c(x,1) = std(meanExpr(x))$ as the constraint function, this way, when we calculate the bias of the dataset:
+
+$h(x)\cdot c(x)$ will only be zero if the positive samples are balanced around the mean expression, and the sign of the bias will indicate the direction of the bias
+
+<br>
+
+#### Calculating the Weights
+<br>
+
+Notes:
+
+- This model is only going to be used to obtain the optimal weights for the observations. The weights obtained in this model are going to be the ones used to train the final model afterwards
+
+- In the original model we would use oversampling as part of the training function, but here, since we are adding weights to the samples, the oversampling will have to be performed separately (otherwise the weights don't match the number of observations), so it was moved inside the `create_train_test_sets` function
+
+```{r calc_weights, warning=FALSE, message=FALSE}
+
+### DEFINE FUNCTIONS
+
+create_train_test_sets = function(p, seed){
+  
+  # Get SFARI Score of all the samples so our train and test sets are balanced for each score
+  sample_scores = dataset %>% mutate(ID = rownames(.)) %>% dplyr::select(ID) %>% 
+                  left_join(biased_predictions %>% dplyr::select(ID, gene.score), by = 'ID') %>% 
+                  mutate(gene.score = ifelse(is.na(gene.score), 'None', gene.score))
+
+  set.seed(seed)
+  train_idx = createDataPartition(sample_scores$gene.score, p = p, list = FALSE)
+  train_set = dataset[train_idx,]
+  test_set = dataset[-train_idx,]
+  
+  # Modify SFARI label in train set, save gene IDS (bc we lose them with SMOTE) and perform oversampling using SMOTE
+  train_set = train_set %>% mutate(SFARI = ifelse(SFARI == TRUE, 'SFARI', 'not_SFARI') %>% as.factor,
+                                   ID = rownames(.) %>% as.factor) %>% SMOTE(form = SFARI ~ . - ID)
+  train_set_IDs = train_set %>% pull(ID)
+  
+  return(list('train_set' = train_set %>% dplyr::select(-ID), 'test_set' = test_set, 
+              'train_set_IDs' = train_set_IDs))
+}
+
+run_weights_model = function(p, seed, Loops){
+  
+  # CREATE TRAIN AND TEST SETS
+  train_test_sets = create_train_test_sets(p, seed)
+  train_set = train_test_sets[['train_set']]
+  test_set = train_test_sets[['test_set']]
+  train_set_IDs = train_test_sets[['train_set_IDs']]
+  
+  
+  # SET INITIAL PARAMETERS
+  
+  # General parameters
+  set.seed(seed)
+  lambda_seq = 10^seq(1, -4, by = -.1)
+  k_fold = 10
+  cv_repeats = 5
+  trControl = trainControl(method = 'repeatedcv', number = k_fold, repeats = cv_repeats, verboseIter = FALSE, 
+                           classProbs = TRUE, savePredictions = 'final', summaryFunction = twoClassSummary)
+  # Bias correction parameters
+  eta = 0.5
+  lambda = 0
+  w = rep(1, nrow(train_set))
+  
+  
+  # TRAIN MODEL
+  h = train(SFARI ~., data = train_set, method = 'glmnet', trControl = trControl, metric = 'ROC',
+            tuneGrid = expand.grid(alpha = 0, lambda = lambda_seq))
+  
+  
+  # CORRECT BIAS
+  
+  # Mean Expression info
+  mean_expr = data.frame('ID' = train_set_IDs) %>% 
+              left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID') %>%
+              mutate('meanExpr_std' = (meanExpr-mean(meanExpr))/sd(meanExpr))
+  
+  # Track behaviour of plot
+  bias_vec = c()
+  acc_vec = c()
+  
+  for(l in 1:Loops){
+    
+    # Calculate bias for positive predicted samples
+    bias = mean(mean_expr$meanExpr_std[predict(h, train_set)=='SFARI'])
+    
+    # Update weights
+    lambda = lambda - eta*bias
+    w_hat = exp(lambda*mean_expr$meanExpr_std)
+    w = 1/(1+w_hat)
+    w[train_set$SFARI=='SFARI'] = w[train_set$SFARI=='SFARI']*w_hat[train_set$SFARI=='SFARI']
+    
+    # Update tracking vars
+    bias_vec = c(bias_vec, bias)
+    acc_vec = c(acc_vec, mean(predict(h, train_set) == train_set$SFARI))
+    
+    # Update h
+    h = train(SFARI ~., data = train_set, method = 'glmnet', weights = w, trControl = trControl, 
+              metric = 'ROC', tuneGrid = expand.grid(alpha = 0, lambda = lambda_seq))
+  }
+
+  
+  return(list('lambda' = lambda, 'bias_vec' = bias_vec, 'acc_vec' = acc_vec))
+}
+
+
+### RUN MODEL TO FIND OPTIMAL WEIGHTS
+
+# Parameters
+p = 0.75
+seed = 123
+Loops = 50
+
+# Run model
+model_output = run_weights_model(p, seed, Loops)
+
+# Extract metrics
+lambda = model_output[['lambda']]
+bias_vec = model_output[['bias_vec']]
+acc_vec = model_output[['acc_vec']]
+
+
+rm(p, seeds, Loops, run_weights_model)
+```
+The optimal value of $\lambda$ is `r lambda`
+
+<br>
+The bias decreases until it oscilates around zero and the accuracy is not affected much
+```{r}
+plot_info = data.frame('iter' = 1:length(bias_vec), 'bias' = bias_vec, 'accuracy' = acc_vec) %>% 
+            melt(id.vars = 'iter')
+
+plot_info %>% ggplot(aes(x=iter, y=value, color = variable)) + geom_line() + xlab('Iteration') + theme_minimal()
+```
+
+Since the bias increases the probability of being classified as 1 for genes with higher levels of expression, as the level of expression of a gene increases, the algorithm:
+
+- **Increases** the weight of genes with a **negative** label
+	
+- **Decreases** the weight of genes with a **positive** label
+
+```{r, warning=FALSE, message=FALSE}
+
+mean_expr = data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)) %>%
+            left_join(predictions, by = 'ID') %>% filter(n>0) %>%
+            mutate('meanExpr_std' = (meanExpr-mean(meanExpr))/sd(meanExpr))
+
+w_hat = exp(lambda*mean_expr$meanExpr_std) # inverso a mean expr
+w0 = 1/(1+w_hat) # prop a mean expr
+w = 1/(1+w_hat)
+w[mean_expr$SFARI %>% as.logical] = w[mean_expr$SFARI %>% as.logical]*w_hat[mean_expr$SFARI %>% as.logical] # inv mean expr Positives, prop Negatives
+plot_data = data.frame('meanExpr' = mean_expr$meanExpr, 'w_hat' = w_hat, 'w0' = w0, 'w' = w, 
+                       'SFARI' = mean_expr$SFARI, 'pred' = mean_expr$pred)
+
+plot_data %>% ggplot(aes(meanExpr, w, color = SFARI)) + geom_point(alpha = 0.3) + 
+              xlab('Mean Expression') + ylab('Weight') +
+              ggtitle('Weights of the final model') + ylim(c(0,1)) + theme_minimal()
+
+
+rm(mean_expr, w_hat, w0, w)
+```
+<br>
+
+#### Running the final model
+
+```{r train_final_model, warning=FALSE, message=FALSE}
+
+run_final_model = function(p, seed, lambda){
+  
+  # CREATE TRAIN AND TEST SETS
+  train_test_sets = create_train_test_sets(p, seed)
+  train_set = train_test_sets[['train_set']]
+  test_set = train_test_sets[['test_set']]
+  train_set_IDs = train_test_sets[['train_set_IDs']]
+  
+  
+  # SET INITIAL PARAMETERS
+  
+  # General parameters
+  set.seed(seed)
+  lambda_seq = 10^seq(1, -4, by = -.1)
+  k_fold = 10
+  cv_repeats = 5
+  trControl = trainControl(method = 'repeatedcv', number = k_fold, repeats = cv_repeats, verboseIter = FALSE, 
+                           classProbs = TRUE, savePredictions = 'final', summaryFunction = twoClassSummary)
+  
+  # Bias correcting parameters
+  mean_expr = data.frame('ID' = train_set_IDs) %>% 
+              left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID') %>%
+              mutate('meanExpr_std' = (meanExpr-mean(meanExpr))/sd(meanExpr))
+  w_hat = exp(lambda*mean_expr$meanExpr_std)
+  w = 1/(1+w_hat)
+  w[train_set$SFARI=='SFARI'] = w[train_set$SFARI=='SFARI']*w_hat[train_set$SFARI=='SFARI']
+  
+  
+  # TRAIN MODEL
+  fit = train(SFARI ~., data = train_set, method = 'glmnet', weights = w, trControl = trControl, 
+              metric = 'ROC', tuneGrid = expand.grid(alpha = 0, lambda = lambda_seq))
+  
+  
+  # PREDICT TEST SET LABELS AND CREATE PERFORMANCE METRICS
+  
+  # Predict labels in test set
+  predictions = fit %>% predict(test_set, type = 'prob')
+  preds = data.frame('ID' = rownames(test_set), 'corrected_prob' = predictions$SFARI) %>% 
+          mutate(corrected_pred = corrected_prob > 0.5)
+  
+
+  # Measure performance of the model
+  acc = mean(test_set$SFARI==preds$corrected_pred)
+  prec = Precision(test_set$SFARI %>% as.numeric, preds$corrected_pred %>% as.numeric, positive = '1')
+  rec = Recall(test_set$SFARI %>% as.numeric, preds$corrected_pred %>% as.numeric, positive = '1')
+  F1 = F1_Score(test_set$SFARI %>% as.numeric, preds$corrected_pred %>% as.numeric, positive = '1')
+  pred_ROCR = prediction(preds$corrected_prob, test_set$SFARI)
+  AUC = performance(pred_ROCR, measure='auc')@y.values[[1]]
+  
+  # Extract coefficients from features
+  coefs = coef(fit$finalModel, fit$bestTune$lambda) %>% as.vector
+  
+  
+  return(list('acc' = acc, 'prec' = prec, 'rec' = rec, 'F1' = F1, 'AUC' = AUC, 'preds' = preds, 'coefs'= coefs))
+}
+
+
+### RUN MODEL
+
+# Parameters
+p = 0.75
+n_iter = 25
+seeds = 123:(123+n_iter-1)
+
+# So the input is the same as in 10_classification_model.html
+original_dataset = dataset %>% mutate(ID = rownames(.)) %>% 
+                   left_join(biased_predictions %>% dplyr::select(ID, gene.score))
+
+# Store outputs
+acc = c()
+prec = c()
+rec = c()
+F1 = c()
+AUC = c()
+predictions = data.frame('ID' = rownames(dataset), 'SFARI' = dataset$SFARI, 'corrected_prob' = 0, 
+                         'corrected_pred' = 0, 'n' = 0)
+coefs = data.frame('var' = c('Intercept', colnames(dataset[,-ncol(dataset)])), 'coef' = 0)
+
+for(seed in seeds){
+  
+  # Run model
+  model_output = run_final_model(p, seed, lambda)
+  
+  # Update outputs
+  acc = c(acc, model_output[['acc']])
+  prec = c(prec, model_output[['prec']])
+  rec = c(rec, model_output[['rec']])
+  F1 = c(F1, model_output[['F1']])
+  AUC = c(AUC, model_output[['AUC']])
+  preds = model_output[['preds']]
+  coefs$coef = coefs$coef + model_output[['coefs']]
+  update_preds = preds %>% dplyr::select(-ID) %>% mutate(n=1)
+  predictions[predictions$ID %in% preds$ID, c('corrected_prob','corrected_pred','n')] = 
+    predictions[predictions$ID %in% preds$ID, c('corrected_prob','corrected_pred','n')] +
+     update_preds
+}
+
+coefs = coefs %>% mutate(coef = coef/n_iter)
+predictions = predictions %>% mutate(corrected_prob = corrected_prob/n, corrected_pred_count = corrected_pred, 
+                                     corrected_pred = corrected_prob>0.5) %>% 
+              left_join(biased_predictions %>% dplyr::select(ID, prob, pred), by = 'ID')
+
+
+rm(p, seeds, update_preds, create_train_test_sets, run_final_model)
+```
+
+```{r, warning=FALSE, message=FALSE}
+
+test_set = predictions %>% filter(n>0) %>% 
+           left_join(dataset %>% mutate(ID = rownames(.)) %>% dplyr::select(ID, GS, MTcor), by = 'ID')
+rownames(test_set) = predictions$ID[predictions$n>0]
+
+```
+
+<br>
+
+#### Results
+<br>
+
+The relation between the model probability and the mean level of expression of the genes is not completely gone, there seems to be a negative relation for the genes with the lowest levels of expression
+
+Even though the trend line is not as flat as with the first method, we are not fixing this directly as we were doing before, this is now just a consequence of the corrections we did inside of the model, so it makes sense for it to be less exact than before
+
+```{r, warning=FALSE, message=FALSE}
+
+# Plot results
+plot_data = data.frame('ID'=rownames(datExpr), 'meanExpr'=rowMeans(datExpr)) %>% 
+            right_join(test_set, by='ID')
+
+plot_data %>% ggplot(aes(meanExpr, corrected_prob)) + geom_point(alpha=0.2, color='#0099cc') +
+              geom_smooth(method='gam', color='gray', alpha=0.2) + 
+              xlab('Mean Expression') + ylab('Corrected Probability') +
+              theme_minimal() + ggtitle('Mean expression vs Model Probability corrected using adjusted Weights')
+```
+
+<br><br>
+
+### Performance metrics
+
+<br>
+
+#### Confusion matrix
+```{r}
+
+conf_mat = test_set %>% apply_labels(SFARI = 'Actual Labels', 
+                                     corrected_prob = 'Assigned Probability', 
+                                     corrected_pred = 'Label Prediction')
+
+cro(conf_mat$SFARI, list(conf_mat$corrected_pred, total()))
+
+rm(conf_mat)
+```
+<br>
+
+#### Accuracy: Mean = `r round(mean(acc),4)`  SD = `r round(sd(acc),4)`
+<br>
+
+#### Precision: Mean = `r round(mean(prec),4)`  SD = `r round(sd(prec),4)`
+<br>
+
+#### Recall: Mean = `r round(mean(rec),4)`  SD = `r round(sd(rec),4)`
+<br>
+
+#### F1 score: Mean = `r round(mean(F1),4)`  SD = `r round(sd(F1),4)`
+<br>
+
+#### ROC Curve: Mean =  `r round(mean(AUC),4)`  SD = `r round(sd(AUC),4)`
+
+```{r ROC_curve}
+pred_ROCR = prediction(test_set$corrected_prob, test_set$SFARI)
+
+roc_ROCR = performance(pred_ROCR, measure='tpr', x.measure='fpr')
+auc = performance(pred_ROCR, measure='auc')@y.values[[1]]
+
+plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(auc,2),')'), col='#009999')
+abline(a=0, b=1, col='#666666')
+```
+<br> 
+
+#### Lift Curve
+```{r lift_plot}
+lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
+plot(lift_ROCR, main='Lift curve', col='#86b300')
+
+rm(pred_ROCR, roc_ROCR, AUC, lift_ROCR, acc, acc_vec, auc, bias_vec, F1, prec, rec)
+```
+
+<br>
+
+---
+
+<br>
+
+### Coefficients
+
+<br>
+
+MTcor and aGS have a very small coefficient and absGGS has the largest negative coefficient of all
+
+```{r, warning=FALSE, message=FALSE}
+gene_corr_info = dataset %>% mutate('ID' = rownames(dataset)) %>% dplyr::select(ID, MTcor, SFARI) %>% 
+                 left_join(assigned_module, by ='ID') %>% mutate(Module = gsub('#','',Module))
+
+coef_info = coefs %>% mutate('feature' = gsub('MM.','',var)) %>% 
+            left_join(gene_corr_info, by = c('feature' = 'Module')) %>% 
+            dplyr::select(feature, coef, MTcor, SFARI) %>% group_by(feature, coef, MTcor) %>% 
+            summarise('SFARI_perc' = mean(SFARI)) %>% arrange(desc(coef))
+
+coef_info %>% dplyr::select(feature, coef) %>% filter(feature %in% c('Intercept','GS','absGS','MTcor')) %>%
+              dplyr::rename('Feature' = feature, 'Coefficient' = coef) %>% 
+              kable(align = 'cc', caption = 'Regression Coefficients') %>% kable_styling(full_width = F)
+```
+<br>
+
+- There is still a positive relation between the coefficient assigned to the membership of each module and the enrichment (using ORA) in SFARI genes that are assigned to that module
+
+```{r, warning=FALSE, message=FALSE}
+load('./../Data/ORA.RData')
+
+enrichment_SFARI_info = data.frame('Module'=as.character(), 'SFARI_enrichment'=as.numeric())
+for(m in names(enrichment_SFARI)){
+  m_info = enrichment_SFARI[[m]]
+  enrichment = 1-ifelse('SFARI' %in% m_info$ID, m_info$pvalue[m_info$ID=='SFARI'],1)
+  enrichment_SFARI_info = enrichment_SFARI_info %>% 
+                          add_row(Module = gsub('#','',m), SFARI_enrichment = enrichment)
+}
+
+plot_data = coef_info %>% dplyr::rename('Module' = feature) %>% 
+            left_join(enrichment_SFARI_info, by = 'Module') %>% filter(!is.na(MTcor))
+
+ggplotly(plot_data %>% ggplot(aes(coef, SFARI_enrichment)) + 
+         geom_smooth(method = 'lm', color = 'gray', alpha = 0.1) + 
+         geom_point(aes(id = Module), color = paste0('#',plot_data$Module), alpha=0.7) + 
+         theme_minimal() + xlab('Coefficient') + 
+         ylab('SFARI Genes Enrichment'))
+
+rm(enrichment_old_SFARI, enrichment_DGN, enrichment_DO, enrichment_GO, enrichment_KEGG, enrichment_Reactome, m,
+   m_info, enrichment)
+```
+
+<br>
+
+For the first time, there seems to be a possitive relation between the coefficients of the model and the correlation of the module and the diagnosis
+
+```{r, warning=FALSE, message=FALSE}
+ggplotly(coef_info %>% dplyr::rename('Module' = feature) %>% filter(!is.na(MTcor)) %>%
+         ggplot(aes(coef, MTcor)) +  geom_smooth(method = 'lm', color = 'gray', alpha = 0.1) + 
+         geom_point(aes(id = Module), color=paste0('#',coef_info$feature[!is.na(coef_info$MTcor)]), alpha=.7) + 
+         theme_minimal() + xlab('Coefficient') + ylab('Module-Diagnosis correlation'))
+```
+
+<br>
+
+---
+
+<br>
+
+### Analyse Results
+<br>
+
+#### Probability distribution by SFARI Label
+<br>
+
+SFARI genes have a higher Probability distribution than the rest, but the overlap is larger than before
+```{r}
+plot_data = test_set %>% dplyr::select(corrected_prob, SFARI)
+
+ggplotly(plot_data %>% ggplot(aes(corrected_prob, fill=SFARI, color=SFARI)) + geom_density(alpha=0.3) + 
+         geom_vline(xintercept = mean(plot_data$corrected_prob[plot_data$SFARI]), color = '#00C0C2', 
+                    linetype='dashed') +
+         geom_vline(xintercept = mean(plot_data$corrected_prob[!plot_data$SFARI]), color = '#FF7371', 
+                    linetype='dashed') +
+        xlab('Score') + ggtitle('Model Probability distribution by SFARI Label') + theme_minimal())
+```
+<br>
+
+#### Probability distribution by SFARI Gene Scores
+<br>
+
+The relation between probability and SFARI Gene Scores weakened but it's still there
+
+```{r fig.width=5, fig.height=6, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_data = test_set %>% mutate(ID=rownames(test_set)) %>% dplyr::select(ID, corrected_prob) %>%
+            left_join(original_dataset, by='ID') %>% dplyr::select(ID, corrected_prob, gene.score) %>% 
+            apply_labels(gene.score='SFARI Gene score')
+
+cro(plot_data$gene.score)
+
+mean_vals = plot_data %>% group_by(gene.score) %>% summarise(mean_prob = mean(corrected_prob))
+
+comparisons = list(c('1','2'), c('2','3'), c('3','Neuronal'), c('Neuronal','Others'),
+                   c('1','3'), c('3','Others'), c('2','Neuronal'),
+                   c('1','Neuronal'), c('2','Others'), c('1','Others'))
+increase = 0.07
+base = 0.75
+pos_y_comparisons = c(rep(base, 4), rep(base + increase, 2), base + 2:5*increase)
+
+plot_data %>% filter(!is.na(gene.score)) %>% ggplot(aes(gene.score, corrected_prob, fill=gene.score)) + 
+              geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) +
+              stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                                 method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                                 tip.length = .02) +
+              scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+              ggtitle('Distribution of probabilities by SFARI score') +
+              xlab('SFARI score') + ylab('Probability') + theme_minimal() + theme(legend.position = 'none')
+
+
+rm(mean_vals, increase, base, pos_y_comparisons)
+```
+<br>
+
+#### Genes with the highest Probabilities
+<br>
+
+- The concentration of SFARI genes decrease from 1:3 to 1:6
+
+- The genes with the highest probabilities are no longer SFARI Genes
+
+```{r}
+test_set %>% dplyr::select(corrected_prob, SFARI) %>% mutate(ID = rownames(test_set)) %>% 
+             arrange(desc(corrected_prob)) %>% top_n(50, wt=corrected_prob) %>%
+             left_join(biased_predictions %>% dplyr::select(ID, gene.score, external_gene_id, MTcor, GS), 
+                       by = 'ID') %>%
+             dplyr::rename('GeneSymbol' = external_gene_id, 'Probability' = corrected_prob, 
+                           'ModuleDiagnosis_corr' = MTcor, 'GeneSignificance' = GS) %>%
+             mutate(ModuleDiagnosis_corr = round(ModuleDiagnosis_corr,4), Probability = round(Probability,4), 
+                    GeneSignificance = round(GeneSignificance,4)) %>%
+             left_join(assigned_module, by = 'ID') %>%
+             dplyr::select(GeneSymbol, GeneSignificance, ModuleDiagnosis_corr, Module, Probability,
+                           gene.score) %>%
+             kable(caption = 'Genes with highest model probabilities from the test set') %>% 
+             kable_styling(full_width = F)
+```
+<br>
+
+---
+
+<br><br>
+
+### Negative samples distribution
+
+<br>
+
+The objective of this model is to identify candidate SFARI genes. For this, we are going to focus on the negative samples (the non-SFARI genes)
+
+```{r}
+negative_set = test_set %>% filter(!SFARI)
+
+negative_set_table = negative_set %>% apply_labels(corrected_prob = 'Assigned Probability', 
+                                                   corrected_pred = 'Label Prediction')
+
+cro(negative_set_table$corrected_pred)
+```
+
+`r sum(negative_set$pred)` genes are predicted as ASD-related
+
+<br>
+```{r}
+negative_set %>% ggplot(aes(corrected_prob)) + geom_density(color='#F8766D', fill='#F8766D', alpha=0.5) +
+                 geom_vline(xintercept=0.5, color='#333333', linetype='dotted') + xlab('Probability') +
+                 ggtitle('Probability distribution of the Negative samples in the Test Set') + 
+                 theme_minimal()
+```
+<br>
+```{r}
+negative_set %>% dplyr::select(corrected_prob, SFARI) %>% mutate(ID = rownames(negative_set)) %>% 
+                 arrange(desc(corrected_prob)) %>% top_n(50, wt=corrected_prob) %>%
+                 left_join(biased_predictions %>% dplyr::select(ID, gene.score, external_gene_id, MTcor, GS), 
+                           by = 'ID') %>%
+                 dplyr::rename('GeneSymbol' = external_gene_id, 'Probability' = corrected_prob, 
+                               'ModuleDiagnosis_corr' = MTcor, 'GeneSignificance' = GS) %>%
+                 mutate(ModuleDiagnosis_corr = round(ModuleDiagnosis_corr,4), 
+                        Probability = round(Probability,4), 
+                        GeneSignificance = round(GeneSignificance,4)) %>%
+                 left_join(assigned_module, by = 'ID') %>%
+                 dplyr::select(GeneSymbol, GeneSignificance, ModuleDiagnosis_corr, Module, Probability,
+                               gene.score) %>%
+                 kable(caption = 'Genes with highest model probabilities from the Negative set') %>% 
+                 kable_styling(full_width = F)
+```
+<br><br><br>
+
+Comparison with the original model's probabilities:
+
+- The genes with the highest Probabilitys were affected the most as a group
+
+- Iin general genes with the lowest Probabilities got their score increased and the genes with the highest scores, decreased
+
+- The change in Probability by gene is much larger than with the Post Processing approach
+
+```{r, warning=FALSE, message=FALSE, fig.height=8, fig.align='center'}
+
+negative_set %>% mutate(diff = abs(prob-corrected_prob)) %>% 
+             ggplot(aes(prob, corrected_prob, color = diff)) + geom_point(alpha=0.2) + scale_color_viridis() + 
+             geom_abline(slope=1, intercept=0, color='gray', linetype='dashed') + 
+             geom_smooth(color='#666666', alpha=0.5, se=TRUE, size=0.5) + coord_fixed() +
+             xlab('Original probability') + ylab('Corrected probability') + theme_minimal() + theme(legend.position = 'none')
+
+```
+
+```{r}
+negative_set_table = negative_set %>% apply_labels(corrected_prob = 'Corrected Probability', 
+                                                   corrected_pred = 'Corrected Class Prediction',
+                                                   pred = 'Original Class Prediction') %>%
+                     filter(!is.na(pred))
+
+cro(negative_set_table$pred, list(negative_set_table$corrected_pred, total()))
+```
+
+`r round(100*mean(negative_set_table$corrected_pred == negative_set_table$pred))`% of the genes maintained their original predicted class
+
+```{r}
+rm(negative_set_table)
+```
+
+#### Probability and Gene Significance
+<br>
+
+The relation is the opposite as before, the higher the Gene Significance, the higher the probability, with the lowest probabilities corresponding to under-expressed genes
+
+*The transparent verison of the trend line is the original trend line
+
+```{r, message=FALSE, warning=FALSE}
+negative_set %>% ggplot(aes(corrected_prob, GS, color=MTcor)) + geom_point() + 
+                 geom_smooth(method='gam', color='#666666') + ylab('Gene Significance') +
+                 geom_line(stat='smooth', method='gam', color='#666666', alpha=0.5, size=1.2, aes(x=prob)) +
+                 geom_hline(yintercept=mean(negative_set$GS), color='gray', linetype='dashed') +
+                 scale_color_gradientn(colours=c('#F8766D','white','#00BFC4')) + xlab('Corrected Probability') +
+                 ggtitle('Relation between the Model\'s Corrected Probability and Gene Significance') + 
+                 theme_minimal()
+```
+
+Summarised version of Probability vs mean expression, plotting by module instead of by gene
+
+The difference in the trend lines between this plot and the one above is that the one above takes all the points into consideration while this considers each module as an observation by itself, so the top one is strongly affected by big modules and the bottom one treats all modules the same
+
+The transparent version of each point and trend lines are the original values and trends before the bias correction
+
+```{r, warning=FALSE, message=FALSE}
+plot_data = negative_set %>% mutate(ID = rownames(.)) %>% left_join(assigned_module, by = 'ID') %>%
+            group_by(MTcor, Module) %>% summarise(mean = mean(prob), sd = sd(prob),
+                                                  new_mean = mean(corrected_prob),
+                                                  new_sd = sd(corrected_prob), n = n()) %>%
+            mutate(MTcor_sign = ifelse(MTcor>0, 'Positive', 'Negative')) %>% 
+            dplyr::select(Module, MTcor, MTcor_sign, mean, new_mean, sd, new_sd, n) %>% distinct()
+colnames(plot_data)[1] = 'ID'
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, new_mean, size=n, color=MTcor_sign)) + geom_point(aes(id = ID)) + 
+         geom_smooth(method='loess', color='gray', se=FALSE) + geom_smooth(method='lm', se=FALSE) + 
+         geom_point(aes(y=mean), alpha=0.3) + 
+         geom_line(stat='smooth', method='loess', color='gray', se=FALSE, alpha=0.3, size=1.2, aes(y=mean)) + 
+         geom_line(stat='smooth', method='lm', se=FALSE, alpha=0.3, size=1.2, aes(y=mean)) + 
+         xlab('Module-Diagnosis correlation') + ylab('Mean Corrected Probability by Module') + 
+         theme_minimal() + theme(legend.position='none'))
+```
+<br>
+
+#### Probability and mean level of expression
+<br>
+
+To check if correcting by gene also corrected by module: Yes, the bias seems to be removed completely, it may even be a bit negative now
+
+```{r, warning=FALSE, message=FALSE, fig.width=10}
+
+mean_and_sd = data.frame(ID=rownames(datExpr), meanExpr=rowMeans(datExpr), sdExpr=apply(datExpr,1,sd))
+
+plot_data = negative_set %>% mutate(ID=rownames(test_set)[!test_set$SFARI]) %>% 
+            left_join(mean_and_sd, by='ID') %>% 
+            left_join(assigned_module, by='ID')
+
+plot_data2 = plot_data %>% group_by(Module) %>% summarise(meanExpr = mean(meanExpr), meanProb = mean(prob), 
+                                                          new_meanProb = mean(corrected_prob), n=n())
+
+ggplotly(plot_data2 %>% ggplot(aes(meanExpr, new_meanProb, size=n)) + 
+         geom_point(color=plot_data2$Module) + geom_point(color=plot_data2$Module, alpha=0.3, aes(y=meanProb)) + 
+         geom_smooth(method='loess', se=TRUE, color='gray', alpha=0.1, size=0.7) + 
+         geom_line(stat='smooth', method='loess', se=TRUE, color='gray', alpha=0.4, size=1.2, aes(y=meanProb)) +
+         xlab('Mean Expression') + ylab('Corrected Probability') +  
+         ggtitle('Mean expression vs corrected Model Probability by Module') +
+         theme_minimal() + theme(legend.position='none'))
+
+
+rm(plot_data2, mean_and_sd)
+```
+<br>
+
+#### Probability and LFC
+<br>
+
+For under-expressed genes, the relation between LFC and probability got inverted. The difference is quite big
+
+For over-expressed genes, the trend didn’t change, it just got translated higher. Now in general, over-expressed genes have higher probabilities than over-expressed genes
+```{r, fig.width=10, message=FALSE, warning=FALSE}
+plot_data = negative_set %>% mutate(ID=rownames(test_set)[!test_set$SFARI]) %>% 
+            left_join(DE_info %>% data.frame %>% mutate(ID=rownames(.)), by='ID')
+
+plot_data %>% ggplot(aes(log2FoldChange, corrected_prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.1) + 
+              geom_line(stat='smooth', method='loess', color='gray', alpha=0.4, size=1.5, aes(y=prob)) +
+              xlab('LFC') + ylab('Corrected Probability') +
+              theme_minimal() + ggtitle('LFC vs model probability by gene')
+```
+
+
+The trends for DE genes don’t seem to have changed much, they were just translated, upwards for over-expressed genes, and downwards for under-expressed genes
+
+The big difference we see in the plot above is just the connection between the patterns for under and over-expressed genes
+
+The group that seem to be affected the least is the non-DE group of under-expressed genes
+
+
+```{r, fig.width=12, fig.height = 6, message=FALSE, warning=FALSE}
+p1 = plot_data %>% filter(log2FoldChange<0) %>% mutate(DE = padj<0.05) %>% 
+     ggplot(aes(log2FoldChange, corrected_prob, color=DE)) + geom_point(alpha=0.1) + 
+     geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Corrected Probability') + 
+     ylim(c(min(plot_data$corrected_prob), max(plot_data$corrected_prob))) + 
+     geom_line(stat='smooth', method='loess', alpha=0.4, size=1.5, aes(y=prob, color = DE)) +
+     theme_minimal() + theme(legend.position = 'none', plot.margin=unit(c(1,-0.3,1,1), 'cm'))
+
+p2 = plot_data %>% filter(log2FoldChange>=0) %>% mutate(DE = padj<0.05) %>% 
+     ggplot(aes(log2FoldChange, corrected_prob, color=DE)) + geom_point(alpha=0.1) + 
+     geom_smooth(method='loess', alpha=0.1) + xlab('') + ylab('Corrected Probability') + ylab('') +
+     scale_y_continuous(position = 'right', 
+                        limits = c(min(plot_data$corrected_prob), max(plot_data$corrected_prob))) +
+     geom_line(stat='smooth', method = 'loess', alpha=0.4, size=1.5, aes(y = prob, color = DE)) +
+     theme_minimal() + theme(plot.margin = unit(c(1,1,1,-0.3), 'cm'), axis.ticks.y = element_blank())
+
+grid.arrange(p1, p2, nrow=1, top = 'LFC vs model probability by gene', bottom = 'LFC')
+
+rm(p1, p2)
+```
+<br>
+
+#### Probability and Module-Diagnosis correlation
+<br>
+
+The Probabilitys decreased for modules with negative correlation and increased for modules with positive correlation
+
+```{r warning=FALSE, message=FALSE, fig.width=10}
+
+module_score = negative_set %>% mutate(ID=rownames(test_set)[!test_set$SFARI]) %>%
+               left_join(biased_predictions %>% dplyr::select(ID, gene.score), by='ID') %>%
+               left_join(assigned_module, by = 'ID') %>%
+               dplyr::select(ID, prob, corrected_prob, Module, MTcor) %>% 
+               left_join(data.frame(MTcor=unique(dataset$MTcor)) %>% arrange(by=MTcor) %>% 
+                         mutate(order=1:length(unique(dataset$MTcor))), by='MTcor')
+
+ggplotly(module_score %>% ggplot(aes(MTcor, corrected_prob)) + 
+         geom_point(color=module_score$Module, aes(id=ID, alpha=corrected_prob^4)) +
+         geom_hline(yintercept=mean(module_score$corrected_prob), color='gray', linetype='dotted') + 
+         geom_line(stat='smooth', method = 'loess', color='gray', alpha=0.5, size=1.5, aes(x=MTcor, y=prob)) +
+         geom_smooth(color='gray', method = 'loess', se = FALSE, alpha=0.3) + theme_minimal() + 
+         xlab('Module-Diagnosis correlation') + ylab('Corrected Probability'))
+
+```
+
+<br><br>
+
+### Conclusion
+<br>
+
+This bias correction makes bigger changes in the distribution of the probabilities than the post-processing one. Its main effect seems to be to reduce the importance of the under-expressed genes and increase the importance of over-expressed genes
+
+In general the performance metrics decrease, but this isn't necessarily wrong, since we knew part of the good performance of the model was because of the confounding factor related to mean level of expression, so it was expected for the performance of the model to decrease once we have removed this signal
+<br>
+
+---
+
+#### Saving results
+
+```{r save_results}
+write.csv(test_set, file='./../Data/RM_weighting_bias_correction.csv', row.names = TRUE)
+```
+<br><br>
+
+---
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
