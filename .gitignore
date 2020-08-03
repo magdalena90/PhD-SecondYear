@@ -6,7 +6,9 @@
 */.Rhistory
 */*/.Rhistory
 
-*/Data/
-*/*/Data/
-*/*/*/Data/
+*/Data/*
+*/*/Data/*
+*/*/*/Data/*
+
 */*/Visualisations/*.csv
+
