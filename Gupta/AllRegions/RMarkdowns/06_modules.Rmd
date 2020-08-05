@@ -230,7 +230,7 @@ rm(ME_object)
 
 - We can see the correlation between Diagnosis and Processing Group caused by the imbalanced diagnosis in each group, but the Diagnosis correlation is much stronger thn the Processing Group
 
-```{r plot_heatmap, fig.width=10, fig.height=12, warning=FALSE, message=FALSE}
+```{r plot_heatmap, fig.width=10, fig.height=20, warning=FALSE, message=FALSE}
 # Sort moduleTraitCor by Diagnosis
 moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
 moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
@@ -494,11 +494,9 @@ rm(increase, base, pos_y_comparisons)
 ### SFARI Scores vs Module-Diagnosis correlation
 <br>
 
-- The higher the SFARI score, the lower the Module-Trait correlation <span style="color:red">(!)</span>
+- SFARI Score 1 has the highest Module-Diagnosis distribution of all groups
 
-- The group with the highest Module-Diagnosis correlation is SFARI score 3, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
-
-- Most differences are not statistically significant, but SFARI Score 3 does have a significant difference with SFARI Score 2 and with non-Neuronal genes
+- No difference is statistically significant
 
 **Note:** Filtering out gray module because otherwise too many genes share the same Module-Diagnosis correlation
 ```{r SFARI_MD, warning=FALSE, message=FALSE, fig.height=8, fig.width=6, fig.align='center'}
@@ -596,7 +594,7 @@ ggplotly(enrichment_data %>% ggplot(aes(perc_SFARI, 1-pval_ORA, size=size)) +
 #### SFARI Enrichment vs Module-Diagnosis Correlation
 <br>
 
-There doesn't seem to be a strong relation between these two metrics, if anything, they seem to contradict each other, mainly in modules with a high Module-Diagnosis correlation, which are the ones with the lowest trend for Enrichment on SFARI Genes <span style="color:red">(!)</span>
+There doesn't seem to be a strong relation between these two metrics, perhaps the modules with the largest negative Module-Diagnosis correlation have higher Enrichment in SFARI Genes than the rest of the dataset
 
 <br>
 Cor(SFARI Enrichment, Module-Diagnosis) = `r round(cor(enrichment_data$MTcor, 1-enrichment_data$pval_ORA),2)[1]`
@@ -701,7 +699,7 @@ plot_data = plot_data %>% dplyr::select(-gene.score) %>%
 ### SFARI Scores vs Gene Significance
 <br>
 
-- All SFARI Scores have except Score 6 a lower median than all genes that have a neuronal-related annotation <span style="color:red">(!)</span>
+- SFARI Score 6 has the highest median of all groups of genes <span style="color:red">(!)</span>
 
 - Neuronal annotated genes have higher Gene Significance than genes without any neuronal-related annotation (makes sense)
 
@@ -736,9 +734,11 @@ rm(increase, base, pos_y_comparisons)
 ### SFARI Scores vs Module-Diagnosis correlation
 <br>
 
-- SFARI Scores 1 to 5 have similar distributions
+- SFARI Scores 2 to 5 have similar distributions
 
-- SFARI Score 3 has the lowest distribution of Module-Diagnosis correlations
+- SFARI Score 6 has the highest Module-Diagonsis correlation magnitude distribution. It seems to have a distribution different to the rest of the SFARI genes
+
+- SFARI Score 1 also has a high Module-Diagnosis correlation magnitude distribution
 
 - The group with the highest Module-Diagnosis correlation is SFARI score 6, which is supposed to be the one with the least amount of evidence suggesting a relation to autism <span style="color:red">(!)</span>
 
@@ -822,9 +822,9 @@ ggplotly(enrichment_data %>% ggplot(aes(perc_SFARI, 1-pval_ORA, size=size)) +
 
 There is a stronger relation between these two metrics than with the new SFARI Genes:
 
-- As before, modules with a high Module-Diagnosis correlation are the ones with the lowest trend of Enrichment on SFARI Genes<span style="color:red">(!)</span>
+- Mdules with a high Module-Diagnosis correlation are the ones with the lowest trend of Enrichment on SFARI Genes<span style="color:red">(!)</span>
 
-- But this time, there seems to be a positive relation between the magnitude of the Module-Diagnosis correlation and the SFARI Enrichment for the modules with the highest (negative) Module-Trait Diagnosis, which is lost in the new SFARI Genes dataset
+- Modules with a high (negative) Module-Diagnosis correlation are the ones with the highest Enrichment in SFARI Genes
 
 <br>
 Cor(SFARI Enrichment, Module-Diagnosis) = `r round(cor(enrichment_data$MTcor, 1-enrichment_data$pval_ORA),2)[1]`
@@ -914,9 +914,9 @@ rm(i, module, genes_in_module, ORA_module, term2gene, SFARI_scores, missing_scor
 #### Comparison between Old and New SFARI Genes
 <br>
 
-- With both SFARI Gene lists, there seems to be a small negative correlation between Mdoule-Trait correlation and SFARI Enrichment, with the genes with a negative Module-Diagnosis correlation having higher SFARI enrichment and genes with positive Module-Diagnosis correlation lower SFARI enrichment
+- With both SFARI Gene lists, there seems to be a correlation between Mdoule-Diagnosis correlation and SFARI Enrichment in modules with negative Module-Diagnosis correlation
 
-- In the histogram on the right we can see that the enrichment for the new SFARI Genes is weaker (with higher density close to zero) than the old SFARI Genes
+- In the histogram on the right we can see that the enrichment for the new SFARI Genes is slightly weaker (with higher density close to zero) than the old SFARI Genes
 
 
 ```{r, warning=FALSE, message=FALSE, fig.align='center'}
@@ -945,11 +945,11 @@ rm(p, compare_plot)
 ### Conclusion:
 <br>
 
-- Not only are SFARI genes not consistent with the other measurements, but they even seem to contradict them, although the strength of the relations is usually not strong enough to be statistically significant
+- SFARI genes not consistent with the other measurements, they even sometimes seem to contradict them, although the strength of the relations is usually not strong enough to be statistically significant
 
-- Modules with negative Module-Diagnosis correlation have a higher enrichment in SFARI Genes than the genes with a positive Module-Diagnosis correlation (specially the modules with high (positive) correlation, which have the lowest enrichment of all the modules)
+- Modules with negative Module-Diagnosis correlation have a higher enrichment in SFARI Genes than the genes with a positive Module-Diagnosis correlation
 
-- These patterns are visible in both old and new SFARI Scoring systems
+- These patterns are visible in both old and new SFARI Scoring systems, but they are perhaps a bit clearer with the old SFARI scoring system
 
 <br><br>
 

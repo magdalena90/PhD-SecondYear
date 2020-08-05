@@ -261,7 +261,7 @@ genes_info %>% group_by(Group, significant) %>% tally(name = 'DE') %>% filter(si
                kable(caption = 'Proportion of DE Genes by Group') %>% kable_styling(full_width = F)
 ```
 
-SFARI Genes have consistently lower similar percentage of DE genes than the Genes with Neuronal annotations and a slightly higher level to the rest of the genes
+SFARI Genes have consistently lower percentage of DE genes than the Genes with Neuronal annotations and a slightly higher level to the rest of the genes
 
 ```{r warning=FALSE, message=FALSE, fig.width=10}
 

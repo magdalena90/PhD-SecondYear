@@ -822,7 +822,8 @@ DE_info = DE_info %>% data.frame
 
 ```
 
-**There doesn't seem to be any relation between the level of expression of the genes and the probability assigned to the model** despite this happening in Gandal's dataset
+**The relation between mean level of expression of the genes and the probability assigned by the model is a lot weaker than in Gandal's dataset, but it's still there**
+
 
 ```{r probability_and_meanExpr, warning=FALSE, message=FALSE, fig.align='center'}
 
@@ -843,7 +844,7 @@ plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.2, color='#0099cc
 
 rm(mean_and_sd)
 ```
-Grouping the genes by module we see there may be a small positive non-linear correlation between mean level of expression and model probability, but it's still not as strong as in Gandal's dataset
+Grouping the genes by module we see there may be a small non-linear relation between mean level of expression and model probability, but again, it's still not as strong as in Gandal's dataset
 ```{r, message=FALSE, fig.align='center'}
 plot_data2 = plot_data %>% group_by(Module) %>% summarise(meanExpr = mean(meanExpr), meanProb = mean(prob), 
                                                           n=n())
@@ -906,13 +907,11 @@ rm(p1, p2)
 
 <br>
 
-- The model doesn't seem to be capturing the level of expression of the genes as strongly as it did in Gandal's dataset. This would mean that no bias correction is not as necessary for this dataset, and that the bias in probabilities we observe by SFARI Score is defined by something else.
+- The model doesn't seem to be capturing the level of expression of the genes as strongly as it did in Gandal's dataset. This would mean that performing some sort of bias correction is not as necessary for this dataset
 
-- It seems to be capturing true biological signals (based on the GS and the log fold change plots).
+- Even though the mean expression bias is not as strong, we can still see some statistically significant differences in probabilities by SFARI Gene Scores, which suggests that this bias not only comes from the level of expression, but from something else as well
 
-<!-- ... -->
-
-<!-- **New conclusion:** The model seems to be capturing some sort of confounding variable to make the predictions, it would seem that it's related to the mean expression or the standard deviation of the genes, but in `10_10_20_data_preprocessing_standardising_expr.RData` we standardised the dataset and it made no difference in the resulting clusterings, which means that there is some other behaviour related to the level of expression of a gene or its standard deviation that is biasing the classifier, but I don't know what it could be or how to fix it ... -->
+- It seems to be capturing true biological signals (based on the GS and the log fold change plots)
 
 ---
 

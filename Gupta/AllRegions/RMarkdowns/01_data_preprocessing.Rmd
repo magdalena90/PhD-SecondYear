@@ -1026,11 +1026,12 @@ pca_genes_before = datExpr %>% prcomp
 
 # Correct
 mod = model.matrix(~ Diagnosis, colData(dds))
-svs = datMeta %>% dplyr::select(SV1:SV13) %>% as.matrix
+svs = datMeta %>% dplyr::select(contains('SV')) %>% as.matrix
 datExpr_corrected = correctDatExpr(as.matrix(datExpr), mod, svs)
 
 pca_samples_after = datExpr_corrected %>% t %>% prcomp
 pca_genes_after = datExpr_corrected %>% prcomp
+
 
 rm(correctDatExpr)
 ```
@@ -1123,7 +1124,7 @@ rm(plot_data_b1, plot_data_b2, plot_data, mu)
 
 <br><br>
 
-I will save the batch corrected dataset as a different dataset because of the correlation between processing group and diagnosis and I will use the dataset without the batch correction for the rest of the pipeline to avoid losing Diagnosis information when removing the Processing Group signal from the data
+I will save the batch corrected dataset as a different dataset because of the correlation between processing group and diagnosis and I will use the dataset without the batch correction for the rest of the pipeline to avoid losing Diagnosis information when removing the Processing Group signal from the data (in the end, since I'm using this dataset only as a backup for Gandal's dataset, it's better to have false positives in the genes with relation to Diagnosis than false negatives, which would be what could potentially happen if we use the batch corrected dataset)
 
 https://support.bioconductor.org/p/50983/
 
@@ -1131,17 +1132,19 @@ https://support.bioconductor.org/p/50983/
 datExpr_combat = datExpr %>% as.matrix %>% ComBat(batch=datMeta$SiteHM)
 ```
 
-Now both batches have almost the same mean expression
-```{r, warning=FALSE}
+Now both batches have similar mean expression
+```{r, warning=FALSE, message=FALSE}
+
 plot_data_b1 = data.frame('Mean'=colMeans(datExpr_combat[,datMeta$SiteHM=='H']), 'Batch'='H')
 plot_data_b2 = data.frame('Mean'=colMeans(datExpr_combat[,datMeta$SiteHM=='M']), 'Batch'='M')
 
 plot_data = rbind(plot_data_b1, plot_data_b2)
-mu = plot_data %>% group_by(Batch) %>% dplyr::summarise(BatchMean=mean(Mean))
+mu = plot_data %>% group_by(Batch) %>% dplyr::summarise(BatchMean=mean(Mean)) %>% ungroup
 
 ggplotly(plot_data %>% ggplot(aes(x=Mean, color=Batch, fill=Batch)) + geom_density(alpha=0.3) + 
          geom_vline(data=mu, aes(xintercept=BatchMean, color=Batch), linetype='dashed') +
          ggtitle('Mean expression by sample grouped by processing date') + scale_x_log10() + theme_minimal())
+
 
 rm(plot_data_b1, plot_data_b2, plot_data, mu)
 ```
