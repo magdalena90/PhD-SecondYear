@@ -1,0 +1,455 @@
+---
+title: 'WGCNA Top SFARI Modules Exploratory Analysis'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, warning=FALSE, message=FALSE}
+#setwd('/afs/inf.ed.ac.uk/user/s17/s1725186/Documents/PhD-Models/FirstPUModel/RMarkdowns')
+
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(expss)
+library(polycor)
+library(foreach) ; library(doParallel)
+library(knitr) ; library(kableExtra)
+library(biomaRt)
+library(clusterProfiler) ; library(ReactomePA) ; library(DOSE) ; library(org.Hs.eg.db)
+library(WGCNA)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+```
+
+Load preprocessed dataset (preprocessing code in 01_data_preprocessing.Rmd) and clustering (pipeline in 05_WGCNA.Rmd)
+```{r load_dataset, message=FALSE, warning=FALSE}
+
+# Gandal dataset
+load('./../Data/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+rownames(datExpr) = datGenes$ensembl_gene_id
+datMeta = datMeta %>% mutate(ID = paste0('X',description))
+
+
+# GO Neuronal annotations: regex 'neuron' in GO functional annotations and label the genes that make a match as neuronal
+GO_annotations = read.csv('./../Data/genes_GO_annotations.csv')
+GO_neuronal = GO_annotations %>% filter(grepl('neuron', go_term)) %>% 
+              mutate('ID'=as.character(ensembl_gene_id)) %>% 
+              dplyr::select(-ensembl_gene_id) %>% distinct(ID) %>%
+              mutate('Neuronal'=1)
+
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+SFARI_genes = SFARI_genes[!duplicated(SFARI_genes$ID) & !is.na(SFARI_genes$ID),]
+
+
+# Clusterings
+clusterings = read_csv('./../Data/clusters.csv')
+
+
+# Update DE_info with SFARI and Neuronal information
+genes_info = DE_info %>% mutate('ID'=datGenes$ensembl_gene_id, padj = adj.P.Val, log2FoldChange = logFC) %>% 
+             left_join(SFARI_genes, by='ID') %>% 
+             mutate(`gene-score`=ifelse(is.na(`gene-score`), 'Others', `gene-score`)) %>%
+             left_join(GO_neuronal, by='ID') %>% left_join(clusterings, by='ID') %>%
+             mutate(Neuronal=ifelse(is.na(Neuronal), 0, Neuronal)) %>%
+             mutate(gene.score=ifelse(`gene-score`=='Others' & Neuronal==1, 'Neuronal', `gene-score`), 
+                    significant=padj<0.05 & !is.na(padj))
+
+# Add gene symbol
+getinfo = c('ensembl_gene_id','external_gene_id')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl',
+               host='feb2014.archive.ensembl.org') ## Gencode v19
+gene_names = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), values=genes_info$ID, mart=mart)
+
+genes_info = genes_info %>% left_join(gene_names, by=c('ID'='ensembl_gene_id'))
+
+
+clustering_selected = 'DynamicHybrid'
+genes_info$Module = genes_info[,clustering_selected]
+
+dataset = read.csv(paste0('./../Data/dataset_', clustering_selected, '.csv'))
+dataset$Module = dataset[,clustering_selected]
+
+load('./../Data/GSEA.RData')
+GSEA_SFARI = enrichment_SFARI
+
+load('./../Data/ORA.RData')
+ORA_SFARI = enrichment_SFARI
+
+
+rm(DE_info, GO_annotations, clusterings, getinfo, mart, efit, enrichment_DGN, enrichment_DO, enrichment_GO,
+   enrichment_KEGG, enrichment_Reactome, enrichment_SFARI)
+```
+
+<br>
+
+## Selecting Top Modules
+<br>
+
+We have results both from GSEA and ORA to measure the enrichment of SFARI Genes in each module, and they both agree with each other relatively well
+
+```{r, warning=FALSE, message=FALSE}
+
+SFARI_genes_by_module = c()
+
+for(module in names(GSEA_SFARI)){
+  
+  GSEA_info = GSEA_SFARI[[module]] %>% dplyr::select(ID, pvalue, p.adjust, NES) %>%
+              mutate(pvalue = ifelse(NES>0, pvalue, 1-pvalue), 
+                     p.adjust = ifelse(NES>0, p.adjust, 1)) %>%
+              dplyr::rename('GSEA_pval' = pvalue, 'GSEA_padj'= p.adjust)
+  
+  ORA_info = ORA_SFARI[[module]] %>% dplyr::select(ID, pvalue, p.adjust, qvalue, GeneRatio, Count) %>%
+             dplyr::rename('ORA_pval' = pvalue, 'ORA_padj' = p.adjust)
+  
+  module_info = GSEA_info %>% full_join(ORA_info, by = 'ID') %>% add_column(.before = 'ID', Module = module)
+  
+  SFARI_genes_by_module = rbind(SFARI_genes_by_module, module_info)
+}
+
+SFARI_genes_by_module = SFARI_genes_by_module %>% 
+                        left_join(dataset %>% dplyr::select(Module, MTcor) %>% 
+                                  group_by(Module,MTcor) %>% tally %>% ungroup, by = 'Module') %>%
+                        mutate(ORA_pval = ifelse(is.na(ORA_pval), 1, ORA_pval),
+                               ORA_padj = ifelse(is.na(ORA_padj), 1, ORA_padj))
+
+plot_data = SFARI_genes_by_module %>% filter(ID=='SFARI')
+
+ggplotly(plot_data %>% ggplot(aes(1-GSEA_pval, 1-ORA_pval, size = n)) + 
+         geom_point(color = plot_data$Module, alpha = .6, aes(id=Module)) + 
+         geom_smooth(se=FALSE, color = '#CCCCCC') + 
+         xlab('GSEA Enrichment') + ylab('ORA Enrichment') + coord_fixed() +
+         ggtitle(paste0('Corr = ', round(cor(plot_data$GSEA_pval, plot_data$ORA_pval),2))) +
+         theme_minimal() + theme(legend.position = 'none'))
+
+```
+<br><br>
+
+To determine which modules have a statistically significant enrichment in SFARI Genes we can use the adjusted p-values. We used the Bonferroni correction for this.
+
+GSEA identifies `r sum(plot_data$GSEA_padj<0.01)`/`r nrow(plot_data)` as significant. This doesn't make sense
+
+```{r warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(GSEA_padj, ORA_padj, size = n)) + 
+         geom_point(color = plot_data$Module, alpha = .7, aes(id=Module)) + 
+         geom_smooth(se=FALSE, color = '#CCCCCC') + 
+         geom_hline(yintercept = 0.01, color = 'gray', linetype = 'dashed') +
+         geom_vline(xintercept = 0.01, color = 'gray', linetype = 'dashed') +
+         xlab('GSEA adjusted p-value') + ylab('ORA adjusted p-value') + 
+         scale_x_log10(limits = c(min(plot_data$GSEA_padj, plot_data$ORA_padj),1.2)) + 
+         scale_y_log10(limits = c(min(plot_data$GSEA_padj, plot_data$ORA_padj),1.2)) +
+         ggtitle(paste0('Corr = ',round(cor(plot_data$GSEA_padj, plot_data$ORA_padj),2))) + coord_fixed() +
+         theme_minimal() + theme(legend.position = 'none'))
+
+plot_data = plot_data %>% mutate(GSEA_sig = GSEA_padj<0.01, ORA_sig = ORA_padj<0.01) %>%
+            apply_labels(GSEA_sig = 'GSEA significant enrichment',
+                         ORA_sig = 'ORA significant enrichment')
+
+cro(plot_data$GSEA_sig, list(plot_data$ORA_sig, total()))
+```
+<br><br>
+
+The 'over-enrichment' in SFARI Modules in GSEA could be because SFARI Genes have in general higher Module Memberships than the other genes, which would make them cluster at the beginning of the list constantly and would bias the enrichment analysis.
+
+Looking at the plot below, we can see that there is not a uniform distribution of SFARI genes across all quantiles of the Module Membership values, but they instead seem to cluster around Module Membership values with high magnitudes (both positive and negative), so I don't think the GSEA results for the SFARI genes are valid.
+
+Because of this, I'm going to use the enrichment from the ORA to study the SFARI Genes
+
+```{r fig.width=10, warning=FALSE, message=FALSE}
+quant_data = dataset %>% dplyr::select(ID, contains('MM.')) %>% 
+             left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>% dplyr::select(-ID) %>%
+             melt %>% mutate(quant = cut(value, breaks = quantile(value, probs = seq(0,1,0.05)) %>% 
+                                     as.vector, labels = FALSE)) %>%
+             group_by(gene.score, quant) %>% tally %>% ungroup %>% ungroup
+  
+quant_data = quant_data %>% group_by(quant) %>% summarise(N = sum(n)) %>% ungroup %>% 
+            left_join(quant_data, by = 'quant') %>% dplyr::select(quant, gene.score, n, N) %>% 
+            mutate(p = round(100*n/N,2)) %>% filter(!is.na(quant)) %>%
+            mutate(gene.score = factor(gene.score, levels = rev(c('1','2','3','Neuronal','Others'))))
+
+ggplotly(quant_data %>% filter(!gene.score %in% c('Neuronal','Others')) %>% 
+         ggplot(aes(quant, p, fill = gene.score)) + geom_bar(stat='identity') + 
+         xlab('Module Membership Quantiles') + ylab('% of SFARI Genes in Quantile') +
+         ggtitle('Percentage of Genes labelled as SFARI in each Quantile') +
+         scale_fill_manual(values = SFARI_colour_hue(r=rev(c(1:3)))) + 
+         theme_minimal() + theme(legend.position = 'none'))
+
+rm(quant_data)
+```
+<br>
+
+Selecting modules with an adjusted p-value below 0.01 using the ORA
+
+```{r, warning=FALSE, message=FALSE}
+ggplotly(plot_data %>% ggplot(aes(MTcor, ORA_padj, size=n)) + 
+         geom_point(color=plot_data$Module, alpha=0.5, aes(id=Module)) +
+         geom_hline(yintercept = 0.01, color = 'gray', linetype = 'dotted') + 
+         xlab('Module-Diagnosis Correlation') + ylab('Corrected p-values') + scale_y_log10() +
+         ggtitle('Modules Significantly Enriched in SFARI Genes') +
+         theme_minimal() + theme(legend.position = 'none'))
+```
+
+```{r results='isis'}
+top_modules = plot_data %>% arrange(desc(ORA_padj)) %>% filter(ORA_padj<0.01) %>% pull(Module) %>% as.character
+
+plot_data %>% filter(Module %in% top_modules) %>% arrange(ORA_pval) %>%
+              dplyr::select(Module, MTcor, ORA_pval, ORA_padj, qvalue, GeneRatio, Count) %>%
+              rename( ORA_pval = 'p-value', ORA_padj = 'Adjusted p-value') %>%
+              kable %>% kable_styling(full_width = F)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center'}
+
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(dataset, by='ID') %>% 
+            left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>%
+            dplyr::select(ID, external_gene_id, PC1, PC2, Module, gene.score) %>%
+            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(color = ifelse(ImportantModules=='Others','gray',ImportantModules),
+                   alpha = ifelse(ImportantModules=='Others', 0.1, 0.6),
+                   gene_id = paste0(ID, ' (', external_gene_id, ')')) %>%
+            apply_labels(ImportantModules = 'Top Modules')
+
+plot_data %>% ggplot(aes(PC1, PC2, color=ImportantModules)) + 
+              geom_point(alpha=plot_data$alpha, color=plot_data$color, aes(ID=gene_id)) + theme_minimal() +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+              ggtitle('Genes belonging to the Modules with the highest SFARI Genes Enrichment')
+
+rm(pca)
+```
+<br><br>
+
+---
+
+<br>
+
+# Identifying representative genes for each Module
+<br>
+
+Following the WGCNA pipeline, selecting the genes with the highest Module Membership and Gene Significance
+<br>
+
+#### Top 20 genes for each module
+<br>
+
+Ordered by $\frac{MM+|GS|}{2}$
+
+There aren't that many SFARI genes in the top genes of the modules
+```{r select_important_genes, warning=FALSE, message=FALSE}
+
+create_table = function(module){
+  top_genes = dataset %>% left_join(genes_info %>% dplyr::select(ID, external_gene_id), by='ID') %>% 
+              dplyr::select(ID, external_gene_id, paste0('MM.',gsub('#','',module)), GS, gene.score) %>%
+              filter(dataset$Module==module) %>% dplyr::rename('MM' = paste0('MM.',gsub('#','',module))) %>% 
+              mutate(Relevance = (MM+abs(GS))/2) %>% arrange(by=-Relevance) %>% top_n(20) %>%
+              dplyr::rename('Gene Symbol' = external_gene_id, 'SFARI Score' = gene.score)
+  return(top_genes)
+}
+
+top_genes = list()
+for(i in 1:length(top_modules)) top_genes[[i]] = create_table(top_modules[i])
+
+kable(top_genes[[1]] %>% dplyr::select(-ID), caption=paste0('Top 20 genes for Module ', top_modules[1], 
+      '  (MTcor = ', round(dataset$MTcor[dataset$Module == top_modules[1]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+kable(top_genes[[2]] %>% dplyr::select(-ID), caption=paste0('Top 20 genes for Module ', top_modules[2], 
+      '  (MTcor = ', round(dataset$MTcor[dataset$Module == top_modules[2]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+
+rm(create_table, i)
+```
+
+```{r fig.align = 'center'}
+
+pca = datExpr %>% prcomp
+
+ids = c()
+for(tg in top_genes) ids = c(ids, tg$ID)
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(dataset, by='ID') %>% dplyr::select(ID, PC1, PC2, Module, gene.score) %>%
+            mutate(color = ifelse(Module %in% top_modules, as.character(Module), 'gray')) %>%
+            mutate(alpha = ifelse(color %in% top_modules & ID %in% ids, 1, 0.1))
+
+plot_data %>% ggplot(aes(PC1, PC2)) + geom_point(alpha=plot_data$alpha, color=plot_data$color) + 
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+              theme_minimal() + ggtitle('Most relevant genes for top Modules')
+
+
+rm(ids, pca, tg, plot_data)
+```
+
+<br>
+
+---
+
+<br>
+
+## Enrichment Analysis
+
+<br>
+
+Using the package clusterProfiler. Performing Gene Set Enrichment Analysis (GSEA) and Over Representation Analysis (ORA) using the following datasets:
+
+- Gene Ontology
+
+- Disease Ontology
+
+- Disease Gene Network
+
+- KEGG
+
+- REACTOME
+
+```{r load_GSEA_ORA}
+
+# GSEA
+load('./../Data/GSEA.RData')
+
+# Rename lists
+GSEA_GO = enrichment_GO
+GSEA_DGN = enrichment_DGN
+GSEA_DO = enrichment_DO
+GSEA_KEGG = enrichment_KEGG
+GSEA_Reactome = enrichment_Reactome
+GSEA_SFARI = enrichment_SFARI
+
+
+# ORA
+load('./../Data/ORA.RData')
+
+# Rename lists
+ORA_GO = enrichment_GO
+ORA_DGN = enrichment_DGN
+ORA_DO = enrichment_DO
+ORA_KEGG = enrichment_KEGG
+ORA_Reactome = enrichment_Reactome
+ORA_SFARI = enrichment_SFARI
+
+rm(enrichment_GO, enrichment_DO, enrichment_DGN, enrichment_KEGG, enrichment_Reactome)
+```
+
+```{r functions_for_enrichment_analysis_results}
+compare_methods = function(GSEA_list, ORA_list){
+  
+  for(top_module in top_modules){
+  
+    cat(paste0('  \n  \nEnrichments for Module ', top_module, ' (MTcor=',
+               round(dataset$MTcor[dataset$Module==top_module][1],2), '):  \n  \n'))
+    
+    GSEA = GSEA_list[[top_module]]
+    ORA = ORA_list[[top_module]]
+    
+    cat(paste0('GSEA has ', nrow(GSEA), ' enriched terms  \n'))
+    cat(paste0('ORA has  ', nrow(ORA), ' enriched terms  \n'))
+    cat(paste0(sum(ORA$ID %in% GSEA$ID), ' terms are enriched in both methods  \n  \n'))
+
+    plot_data = GSEA %>% mutate(pval_GSEA = p.adjust) %>% dplyr::select(ID, Description, NES, pval_GSEA) %>%
+                inner_join(ORA %>% mutate(pval_ORA = p.adjust) %>% 
+                           dplyr::select(ID, pval_ORA, GeneRatio, qvalue), by = 'ID') 
+    
+    if(nrow(plot_data)>0){
+      print(plot_data %>% mutate(pval_mean = pval_ORA + pval_GSEA) %>% 
+                          arrange(pval_mean) %>% dplyr::select(-pval_mean) %>% 
+            kable %>% kable_styling(full_width = F))
+    }
+  } 
+}
+
+
+plot_results = function(GSEA_list, ORA_list){
+  
+  l = htmltools::tagList()
+
+  for(i in 1:length(top_modules)){
+    
+    GSEA = GSEA_list[[top_modules[i]]]
+    ORA = ORA_list[[top_modules[i]]]
+    
+    plot_data = GSEA %>% mutate(pval_GSEA = p.adjust) %>% dplyr::select(ID, Description, NES, pval_GSEA) %>%
+                inner_join(ORA %>% mutate(pval_ORA = p.adjust) %>% dplyr::select(ID, pval_ORA), by = 'ID')
+    
+    if(nrow(plot_data)>5){
+      min_val = min(min(plot_data$pval_GSEA), min(plot_data$pval_ORA))
+      max_val = max(max(max(plot_data$pval_GSEA), max(plot_data$pval_ORA)),0.05)
+      ggp = ggplotly(plot_data %>% ggplot(aes(pval_GSEA, pval_ORA, color = NES)) + 
+                     geom_point(aes(id = Description)) + 
+                     geom_vline(xintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     ggtitle(paste0('Enriched terms in common for Module ', top_modules[i])) +
+                     scale_x_continuous(limits = c(min_val, max_val)) + 
+                     scale_y_continuous(limits = c(min_val, max_val)) + 
+                     xlab('Corrected p-value for GSEA') + ylab('Corrected p-value for ORA') +
+                     scale_colour_viridis(direction = -1) + theme_minimal() + coord_fixed())
+      l[[i]] = ggp
+    }
+  }
+  
+  return(l)
+}
+
+```
+<br>
+
+### KEGG
+
+```{r KEGG, results = 'asis'}
+
+compare_methods(GSEA_KEGG, ORA_KEGG)
+
+```
+<br>
+
+### Reactome
+
+```{r Reactome, results = 'asis'}
+
+compare_methods(GSEA_Reactome, ORA_Reactome)
+
+```
+<br>
+
+### Gene Ontology
+
+```{r GO, results = 'asis'}
+
+compare_methods(GSEA_GO, ORA_GO)
+
+```
+<br>
+
+### Disease Ontology
+
+```{r DO, results = 'asis'}
+
+compare_methods(GSEA_DO, ORA_DO)
+
+```
+<br>
+
+### Disease Gene Network
+
+```{r DGN, results = 'asis'}
+
+compare_methods(GSEA_DGN, ORA_DGN)
+
+```
+<br><br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
+
