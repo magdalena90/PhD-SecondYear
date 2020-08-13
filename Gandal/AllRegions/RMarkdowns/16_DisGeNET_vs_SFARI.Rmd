@@ -7,7 +7,7 @@ output:
 
 ```{r load_packages, echo=TRUE, warning=FALSE, message=FALSE}
 library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
-library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr) ; library(rstatix)
 library(VennDiagram)
 library(expss)
 library(biomaRt)
@@ -83,21 +83,21 @@ And both scoring systems agree with each other quite well
 
 ```{r, fig.width=5, fig.height=6, fig.align='center'}
 
-comparisons = list(c('2','3'), c('1','2'), c('3','1'))
+wt = asd_info %>% filter(SFARI*DisGeNET == TRUE) %>% mutate(gene_score = `gene-score` %>% as.factor) %>%
+     wilcox_test(score~gene_score, p.adjust.method='BH') %>% add_x_position(x = 'group')
+
 increase = 0.03
 base = 0.72
-pos_y_comparisons = c(base, base, base + increase)
+pos_y_comparisons = c(base, base + increase, base)
 
-asd_info %>% filter(SFARI*DisGeNET == TRUE) %>% 
-             ggplot(aes(`gene-score` %>% as.factor, score, fill = `gene-score` %>% as.factor)) + 
-             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
-             stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                tip.length = 0.015) +
+asd_info %>% filter(SFARI*DisGeNET == TRUE) %>% mutate(gene_score = `gene-score` %>% as.factor) %>%
+             ggplot(aes(gene_score, score)) + 
+             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = gene_score)) + 
+             stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .02) +
              xlab('SFARI Scores') + ylab('DisGeNET Scores') + 
              scale_fill_manual(values=SFARI_colour_hue(1:3)) + theme_minimal() + theme(legend.position = 'none')
 
-rm(comparisons, increase, base, pos_y_comparisons)
+rm(increase, base, pos_y_comparisons, wt)
 ```
 <br><br>
 
@@ -192,31 +192,32 @@ disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %
                   xlab('Belong to SFARI Genes') + ylab('DisGeNET Score') +
                   theme_minimal() + theme(legend.position = 'bottom')
 
-comparisons = list(c('non-SFARI','3'), c('non-SFARI','2'), c('non-SFARI','1'),
-                   c('3','2'), c('3','1'), c('2','1'))
-increase = 0.15
-base = 0.5
-pos_y_comparisons = log10(c(1:6*increase + base))
 
-disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
+plot_data = disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
                             by = c('gene_symbol'='gene-symbol')) %>% 
                   mutate(SFARI = ifelse(is.na(`gene-score`), 'non-SFARI', `gene-score` %>% as.character)) %>%
                   mutate(SFARI = factor(SFARI, levels = c('1','2','3','non-SFARI'))) %>%
                   dplyr::select(-c(gene_symbol, `gene-score`)) %>%
                   melt(id.vars = c('meanExpr', 'SFARI')) %>% dplyr::rename('Disorder' = variable) %>%
-                  filter(!is.na(value)) %>%
-                  ggplot(aes(SFARI, value, fill = SFARI)) + 
-                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
-                  facet_grid(~Disorder) + scale_y_log10() +
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                     tip.length = 0.015) +
-                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') +
+                  filter(!is.na(value))
+
+wt = plot_data %>% group_by(Disorder) %>% wilcox_test(value~SFARI, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'SFARI')
+
+increase = 0.05
+base = 0.72
+pos_y_comparisons = c(base + c(0,1,3)*increase, base+c(0,2)*increase, base)
+
+plot_data %>% ggplot(aes(SFARI, value)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = SFARI)) + 
+                  facet_grid(~Disorder) + 
+                  stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') + #scale_y_log10() +
                   scale_fill_manual(values = SFARI_colour_hue(c(1:3,6))) +
                   theme_minimal() + theme(legend.position = 'bottom')
 
 
-rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+rm(asd_info, comparisons, increase, base, pos_y_comparisons, wt)
 ```
 <br>
 
@@ -240,49 +241,52 @@ Same conclusions as before, just different visualisations
 
 ```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
 
-comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
-increase = 0.9
-base = 15
-pos_y_comparisons = c(1:3*increase + base)
+plot_data = disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+            dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
 
-disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
-                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
-                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                             labels = c('Low','Medium','High'))) %>%
-                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
-                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
+wt = plot_data %>% group_by(Disorder) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
+increase = 0.9
+base = 16
+pos_y_comparisons =c(base, base+increase, base)
+
+plot_data %>% ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
                   geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                     tip.length = 0.015) +
+                  stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
                   xlab('Binned Scores') + ylab('Mean Expression') + 
                   theme_minimal() + theme(legend.position = 'none')
 
-rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+
+rm(asd_info, increase, base, pos_y_comparisons)
 ```
 <br>
 
 Separating SFARI Genes
 ```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
 
-comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
-increase = 1
-base = 15
-pos_y_comparisons = c(1:3*increase + base)
+plot_data = disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+            dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+            dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
 
-disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
-                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
-                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
-                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                             labels = c('Low','Medium','High'))) %>%
-                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
-                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
-                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                  method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                  tip.length = 0.015) +
-                  xlab('Binned Scores') + ylab('Mean Expression') +
-                  theme_minimal() + theme(legend.position = 'none')
+wt = plot_data %>% group_by(Disorder, SFARI) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
+increase = 1
+base = 16
+pos_y_comparisons = c( c(base, base+increase) ,rep(c(base, base+increase, base),10), c(base, base+increase) )
+
+plot_data %>% ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+              xlab('Binned Scores') + ylab('Mean Expression') +
+              theme_minimal() + theme(legend.position = 'none')
 
 
 rm(comparisons, increase, base, pos_y_comparisons)
@@ -378,26 +382,26 @@ disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %
                   xlab('Belong to SFARI Genes') + ylab('DisGeNET Score') +
                   theme_minimal() + theme(legend.position = 'bottom')
 
-comparisons = list(c('non-SFARI','3'), c('non-SFARI','2'), c('non-SFARI','1'),
-                   c('3','2'), c('3','1'), c('2','1'))
-increase = 0.15
-base = 0.5
-pos_y_comparisons = log10(c(1:6*increase + base))
-
-disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
+plot_data = disgenet_info %>% left_join(SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`), 
                             by = c('gene_symbol'='gene-symbol')) %>% 
                   mutate(SFARI = ifelse(is.na(`gene-score`), 'non-SFARI', `gene-score` %>% as.character)) %>%
                   mutate(SFARI = factor(SFARI, levels = c('1','2','3','non-SFARI'))) %>%
                   dplyr::select(-c(gene_symbol, `gene-score`)) %>%
                   melt(id.vars = c('meanExpr', 'SFARI')) %>% dplyr::rename('Disorder' = variable) %>%
-                  filter(!is.na(value)) %>%
-                  ggplot(aes(SFARI, value, fill = SFARI)) + 
-                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
-                  facet_grid(~Disorder) + scale_y_log10() + ggtitle('DisGeNET Scores vs SFARI Scores') +
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                     tip.length = 0.015) +
-                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') +
+                  filter(!is.na(value))
+
+wt = plot_data %>% group_by(Disorder) %>% wilcox_test(value~SFARI, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'SFARI')
+
+increase = 0.05
+base = 0.8
+pos_y_comparisons = c( rep(c(base + c(0,1,3)*increase, base+c(0,2)*increase, base),4), c(base, base+increase, base))
+
+plot_data %>% ggplot(aes(SFARI, value)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = SFARI)) + 
+                  facet_grid(~Disorder) + 
+                  stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+                  xlab('SFARI Gene Score') + ylab('DisGeNET Score') + #scale_y_log10() +
                   scale_fill_manual(values = SFARI_colour_hue(c(1:3,6))) +
                   theme_minimal() + theme(legend.position = 'bottom')
 
@@ -424,49 +428,55 @@ Same conclusions as before, just different visualisations
 
 ```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
 
-comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+plot_data = disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
+            dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
+
+wt = plot_data %>% group_by(Disorder) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
 increase = 0.9
 base = 15
-pos_y_comparisons = c(1:3*increase + base)
+pos_y_comparisons =c(base, base+increase, base)
 
-disgenet_info %>% dplyr::select(-gene_symbol) %>% melt(id.vars = 'meanExpr') %>% 
-                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
-                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                             labels = c('Low','Medium','High'))) %>%
-                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
-                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
+plot_data %>% ggplot(aes(binned_scores, meanExpr)) + facet_grid(~Disorder) +
                   geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                     method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                     tip.length = 0.015) +
+                  stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
                   xlab('Binned Scores') + ylab('Mean Expression') + 
                   theme_minimal() + theme(legend.position = 'none')
 
-rm(asd_info, comparisons, increase, base, pos_y_comparisons)
+
+rm(asd_info, increase, base, pos_y_comparisons)
 ```
 <br>
 
 Separating SFARI Genes
 ```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
 
-comparisons = list(c('Low','Medium'), c('Low','High'), c('Medium','High'))
+plot_data = disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
+            dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+            dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
+
+wt = plot_data %>% group_by(Disorder, SFARI) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
 increase = 1
 base = 15
-pos_y_comparisons = c(1:3*increase + base)
+pos_y_comparisons = c(base, base+increase, base)
 
-disgenet_info %>% mutate('SFARI' = gene_symbol %in% SFARI_genes$`gene-symbol`) %>% 
-                  dplyr::select(-gene_symbol) %>% melt(id.vars = c('meanExpr', 'SFARI')) %>% 
-                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
-                  mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                             labels = c('Low','Medium','High'))) %>%
-                  mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
-                  ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
-                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill=Disorder)) + 
-                  stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                                  method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                                  tip.length = 0.015) +
-                  xlab('Binned Scores') + ylab('Mean Expression') + 
-                  theme_minimal() + theme(legend.position = 'none')
+plot_data %>% ggplot(aes(binned_scores, meanExpr)) + facet_grid(SFARI ~ Disorder) +
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Disorder)) + 
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+              xlab('Binned Scores') + ylab('Mean Expression') +
+              theme_minimal() + theme(legend.position = 'none')
+
+
+rm(comparisons, increase, base, pos_y_comparisons)
 
 ```
 <br><br>
@@ -504,49 +514,53 @@ draw.pairwise.venn(area1 = sum(scz_SFARI$in_scz), area2 = sum(scz_SFARI$in_SFARI
 ```
 
 ```{r warning=FALSE, message=FALSE, fig.width=10, fig.height = 4}
-
+  
 # SCZ with and without SFARI
-comparisons = list(c('High','Medium'), c('High','Low'), c('Medium','Low'))
-increase = 1
-base = 15
-pos_y_comparisons = c(1:3*increase + base)
+plot_data = scz_SFARI %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_SFARI, scz) %>% 
+            melt(id.vars = c('meanExpr','in_SFARI')) %>% 
+            mutate(in_SFARI = factor(in_SFARI, levels = c(TRUE, FALSE))) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
 
-plot_1 = scz_SFARI %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_SFARI, scz) %>% 
-         melt(id.vars = c('meanExpr','in_SFARI')) %>% 
-         mutate(in_SFARI = factor(in_SFARI, levels = c(TRUE, FALSE))) %>%
-         mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                    labels = c('Low','Medium','High'))) %>%
-         mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+wt = plot_data %>% group_by(in_SFARI) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
+increase = 1
+base = 16
+pos_y_comparisons = c(base, base+increase, base)
+
+plot_1 = plot_data %>%
          ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~in_SFARI) +
          geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = in_SFARI)) + 
-         stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                            method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                            tip.length = 0.015) +
-        xlab('Binned Scores') + ylab('Mean Expression') + 
-        theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by SFARI')
+         stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+         xlab('Binned Scores') + ylab('Mean Expression') + 
+         theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by SFARI')
 
 
 # SFARI with and without SCZ
-comparisons = list(c('1','2'), c('1','3'), c('2','3'))
-increase = 0.9
-base = 14
-pos_y_comparisons = c(1:3*increase + base)
+plot_data = scz_SFARI %>% filter(!is.na(SFARI)) %>% dplyr::select(meanExpr, in_scz, SFARI) %>% 
+            melt(id.vars = c('meanExpr','in_scz'))
+  
+wt = plot_data %>% group_by(in_scz) %>% mutate(value = value %>% as.factor) %>% 
+     wilcox_test(meanExpr~value, p.adjust.method='BH') %>% add_xy_position(x = 'value')
 
-plot_2 = scz_SFARI %>% filter(!is.na(SFARI)) %>% dplyr::select(meanExpr, in_scz, SFARI) %>% 
-         melt(id.vars = c('meanExpr','in_scz')) %>% 
+increase = 0.9
+base = 15
+pos_y_comparisons = c(base, base+increase, base)
+
+plot_2 = plot_data %>%
          ggplot(aes(value %>% as.factor, meanExpr)) + facet_wrap(~in_scz) +
          geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = as.factor(value))) + 
-         stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                            method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                            tip.length = 0.015) +
-        scale_fill_manual(values = SFARI_colour_hue(1:3)) +
-        xlab('SFARI Scores') + ylab('Mean Expression') + 
-        theme_minimal() + theme(legend.position = 'none') + ggtitle('SFARI divided by Schizophrenia')
+         stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+         scale_fill_manual(values = SFARI_colour_hue(1:3)) +
+         xlab('SFARI Scores') + ylab('Mean Expression') + 
+         theme_minimal() + theme(legend.position = 'none') + ggtitle('SFARI divided by Schizophrenia')
 
 
 grid.arrange(plot_2, plot_1, nrow=1)
 
-rm(plot_1, plot_2, scz_SFARI)
+rm(plot_1, plot_2, scz_SFARI, wt)
 ```
 
 ### Schizophrenia vs ASD DisGeNET Genes
@@ -571,45 +585,50 @@ draw.pairwise.venn(area1 = sum(scz_asd$in_scz), area2 = sum(scz_asd$in_asd),
 
 ```{r warning=FALSE, message=FALSE, fig.width=10, fig.height = 4}
 
-comparisons = list(c('High','Medium'), c('High','Low'), c('Medium','Low'))
-increase = 1
-base = 15
-pos_y_comparisons = c(1:3*increase + base)
-
 # SCZ with and without ASD
-plot_1 = scz_asd %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_asd, scz) %>% 
-         melt(id.vars = c('meanExpr','in_asd')) %>% 
-         mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+plot_data = scz_asd %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_asd, scz) %>% 
+            melt(id.vars = c('meanExpr','in_asd')) %>% 
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
                                     labels = c('Low','Medium','High'))) %>%
-         mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
+
+wt = plot_data %>% group_by(in_asd) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
+increase = 1
+base = 16
+pos_y_comparisons = c(base, base+increase, base)
+
+plot_1 = plot_data %>%
          ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~in_asd) +
          geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = in_asd)) + 
-         stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                            method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                            tip.length = 0.015) +
-        xlab('Binned Scores') + ylab('Mean Expression') + 
-        theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by ASD')
+         stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+         xlab('Binned Scores') + ylab('Mean Expression') + 
+         theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by ASD')
 
 
 # ASD with and without SCZ
-plot_2 = scz_asd %>% filter(!is.na(asd)) %>% dplyr::select(meanExpr, in_scz, asd) %>% 
-         melt(id.vars = c('meanExpr','in_scz')) %>% 
-         mutate(in_scz = factor(in_scz, levels = c(TRUE, FALSE))) %>%
-         mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
-                                    labels = c('Low','Medium','High'))) %>%
-         mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
+plot_data = scz_asd %>% filter(!is.na(asd)) %>% dplyr::select(meanExpr, in_scz, asd) %>% 
+            melt(id.vars = c('meanExpr','in_scz')) %>% 
+            mutate(in_scz = factor(in_scz, levels = c(TRUE, FALSE))) %>%
+            mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
+                                       labels = c('Low','Medium','High'))) %>%
+            mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low')))
+
+wt = plot_data %>% group_by(in_scz) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+
+plot_2 = plot_data %>%
          ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~in_scz) +
          geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = in_scz)) + 
-         stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                            method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                            tip.length = 0.015) +
-        xlab('SFARI Scores') + ylab('Mean Expression') + 
-        theme_minimal() + theme(legend.position = 'none') + ggtitle('ASD divided by Schizophrenia')
+         stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+         xlab('SFARI Scores') + ylab('Mean Expression') + 
+         theme_minimal() + theme(legend.position = 'none') + ggtitle('ASD divided by Schizophrenia')
 
 
 grid.arrange(plot_1, plot_2, nrow=1)
 
-rm(plot_1, plot_2, scz_asd)
+rm(plot_1, plot_2, scz_asd, wt)
 ```
 <br><br>
 
@@ -641,25 +660,27 @@ draw.pairwise.venn(area1 = sum(scz_asd$in_scz), area2 = sum(scz_asd$in_asd),
 
 ```{r warning=FALSE, message=FALSE, fig.width=5, fig.height = 4, fig.align='right'}
 
-comparisons = list(c('High','Medium'), c('High','Low'), c('Medium','Low'))
-increase = 1
-base = 15
-pos_y_comparisons = c(1:3*increase + base)
-
-# SCZ with and without ASD
-scz_asd %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_asd, scz) %>% 
+plot_data = scz_asd %>% filter(!is.na(scz)) %>% dplyr::select(meanExpr, in_asd, scz) %>% 
             melt(id.vars = c('meanExpr','in_asd')) %>% 
             mutate(binned_scores = cut(value, breaks = c(0, 0.31, 0.45, 1), 
                                        labels = c('Low','Medium','High'))) %>%
             mutate(binned_scores = factor(binned_scores, levels = c('High','Medium','Low'))) %>%
-            mutate(in_asd = factor(in_asd, levels = c(TRUE, FALSE))) %>%
-            ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~in_asd) +
+            mutate(in_asd = factor(in_asd, levels = c(TRUE, FALSE)))
+
+wt = plot_data %>% group_by(in_asd) %>% wilcox_test(meanExpr~binned_scores, p.adjust.method='BH') %>% 
+     add_xy_position(x = 'binned_scores')
+  
+increase = 1
+base = 15
+pos_y_comparisons = c(base, base+increase, base)
+
+# SCZ with and without ASD
+plot_data %>% ggplot(aes(binned_scores, meanExpr)) + facet_wrap(~in_asd) +
             geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = in_asd)) + 
-            stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
-                               method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
-                               tip.length = 0.015) +
+            stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
             xlab('Binned Scores') + ylab('Mean Expression') + 
             theme_minimal() + theme(legend.position = 'none') + ggtitle('Schizophrenia divided by ASD')
+
 
 rm(comparisons, increase, base, pos_y_comparisons, scz_asd)
 ```

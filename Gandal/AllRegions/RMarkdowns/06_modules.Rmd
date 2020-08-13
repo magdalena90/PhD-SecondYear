@@ -606,7 +606,7 @@ Cor(SFARI Enrichment, Module-Diagnosis) = `r round(cor(enrichment_data$MTcor, 1-
 ```{r, warning=FALSE, message=FALSE, fig.align='center'}
 ggplotly(enrichment_data %>% ggplot(aes(MTcor, 1-pval_ORA, size=size)) + 
          geom_point(color=enrichment_data$Module, alpha=0.5, aes(id=Module)) + 
-         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + 
+         geom_smooth(color='#cccccc', size = 0.5,alpha=0.1) + xlab('Module-Diagnosis Correlation') + 
          ggtitle('SFARI Enrichment vs Module-Diagnosis Correlation') +
          ylab('Enrichment in SFARI Genes') + theme_minimal() + theme(legend.position = 'none'))
 
@@ -830,7 +830,7 @@ Cor(SFARI Enrichment, Module-Diagnosis) = `r round(cor(enrichment_data$MTcor, 1-
 ```{r, warning=FALSE, message=FALSE, fig.align='center'}
 ggplotly(enrichment_data %>% ggplot(aes(MTcor, 1-pval_ORA, size=size)) + 
          geom_point(color=enrichment_data$Module, alpha=0.5, aes(id=Module)) + 
-         geom_smooth(color='#cccccc', size = 0.5, se=FALSE) + xlab('Module-Diagnosis Correlation') + 
+         geom_smooth(color='#cccccc', size = 0.5, alpha=0.1) + xlab('Module-Diagnosis Correlation') + 
          ggtitle('SFARI Enrichment vs Module-Diagnosis Correlation') +
          ylab('Enrichment in SFARI Genes') + theme_minimal() + theme(legend.position = 'none'))
 ```
